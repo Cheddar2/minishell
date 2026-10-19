@@ -8,9 +8,11 @@ fn handle_line(line: &str, out: &mut dyn Write) -> io::Result<()> {
 
 fn main() -> io::Result<()> {
     let mut out = io::stdout().lock();
-    for line in io::stdin().lock().lines() {
+    let mut lines = io::stdin().lock().lines();
+    loop {
         write!(out, "{PROMPT}")?;
         out.flush()?;
+        let Some(line) = lines.next() else { break };
         handle_line(&line?, &mut out)?;
         out.flush()?;
     }
