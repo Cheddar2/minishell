@@ -1,28 +1,97 @@
+mod shell;
+mod signals;
+
 use std::io::{self, BufRead, Write};
 
 const PROMPT: &str = "minishell$ ";
+
+/// True when the line is empty or contains only spaces/tabs.
+fn is_blank(line: &str) -> bool {
+    line.chars().all(|c| c == ' ' || c == '\t')
+}
 
 fn handle_line(line: &str, out: &mut dyn Write) -> io::Result<()> {
     writeln!(out, "{line}")
 }
 
-fn main() -> io::Result<()> {
-    let mut out = io::stdout().lock();
-    let mut lines = io::stdin().lock().lines();
-    loop {
-        write!(out, "{PROMPT}")?;
-        out.flush()?;
-        let Some(line) = lines.next() else { break };
-        handle_line(&line?, &mut out)?;
-        out.flush()?;
+fn main() {
+    let mut shell = shell::Shell::new();
+    if shell.interactive {
+        interactive(&mut shell)
+    } else {
+        non_interactive(&mut shell)
     }
-    writeln!(out, "exit")?;
-    Ok(())
+}
+
+fn interactive(shell: &mut shell::Shell) {
+    signals::set_mode(signals::Mode::Prompt);
+    let mut rl = match rustyline::DefaultEditor::new() {
+        Ok(editor) => editor,
+        Err(err) => {
+            eprintln!("minishell: {err}");
+            std::process::exit(1);
+        }
+    };
+    loop {
+        match rl.readline(PROMPT) {
+            Ok(line) => {
+                if is_blank(&line) {
+                    continue;
+                }
+                let _ = rl.add_history_entry(line.as_str());
+                let mut out = io::stdout().lock();
+                let _ = handle_line(&line, &mut out);
+                shell.last_status = 0;
+            }
+            Err(rustyline::error::ReadlineError::Interrupted) => {
+                shell.last_status = 130;
+            }
+            Err(rustyline::error::ReadlineError::Eof) => {
+                eprintln!("exit");
+                break;
+            }
+            Err(err) => {
+                eprintln!("minishell: {err}");
+                shell.last_status = 1;
+                break;
+            }
+        }
+    }
+    let _ = io::stdout().flush();
+    std::process::exit(shell.last_status);
+}
+
+fn non_interactive(shell: &mut shell::Shell) {
+    let stdin = io::stdin();
+    let lines = stdin.lock().lines();
+    let mut out = io::stdout().lock();
+    for line in lines {
+        let line = match line {
+            Ok(line) => line,
+            Err(_) => {
+                let _ = out.flush();
+                std::process::exit(1);
+            }
+        };
+        if is_blank(&line) {
+            continue;
+        }
+        let _ = handle_line(&line, &mut out);
+    }
+    let _ = out.flush();
+    std::process::exit(shell.last_status);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_blank_detects_blank_lines() {
+        assert!(is_blank(""));
+        assert!(is_blank("   \t "));
+        assert!(!is_blank("a"));
+    }
 
     #[test]
     fn handle_line_echoes_with_newline() {
