@@ -1,3 +1,4 @@
+mod lexer;
 mod shell;
 mod signals;
 
@@ -12,6 +13,19 @@ fn is_blank(line: &str) -> bool {
 
 fn handle_line(line: &str, out: &mut dyn Write) -> io::Result<()> {
     writeln!(out, "{line}")
+}
+
+fn process_line(line: &str, shell: &mut shell::Shell, out: &mut dyn Write) {
+    match lexer::lex(line) {
+        Err(lexer::LexError::UnclosedQuote(q)) => {
+            eprintln!("minishell: syntax error: unclosed quote `{q}'");
+            shell.last_status = 2;
+        }
+        Ok(_) => {
+            let _ = handle_line(line, out);
+            shell.last_status = 0;
+        }
+    }
 }
 
 fn main() {
@@ -40,8 +54,7 @@ fn interactive(shell: &mut shell::Shell) {
                 }
                 let _ = rl.add_history_entry(line.as_str());
                 let mut out = io::stdout().lock();
-                let _ = handle_line(&line, &mut out);
-                shell.last_status = 0;
+                process_line(&line, shell, &mut out);
             }
             Err(rustyline::error::ReadlineError::Interrupted) => {
                 shell.last_status = 130;
@@ -76,7 +89,7 @@ fn non_interactive(shell: &mut shell::Shell) {
         if is_blank(&line) {
             continue;
         }
-        let _ = handle_line(&line, &mut out);
+        process_line(&line, shell, &mut out);
     }
     let _ = out.flush();
     std::process::exit(shell.last_status);
