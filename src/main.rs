@@ -1,3 +1,5 @@
+mod env;
+mod expand;
 mod lexer;
 mod shell;
 mod signals;
@@ -21,8 +23,17 @@ fn process_line(line: &str, shell: &mut shell::Shell, out: &mut dyn Write) {
             eprintln!("minishell: syntax error: unclosed quote `{q}'");
             shell.last_status = 2;
         }
-        Ok(_) => {
-            let _ = handle_line(line, out);
+        Ok(tokens) => {
+            let words: Vec<String> = tokens
+                .iter()
+                .filter_map(|t| match t {
+                    lexer::Token::Word(segs) => {
+                        expand::expand_word(segs, &shell.env, shell.last_status)
+                    }
+                    _ => None,
+                })
+                .collect();
+            let _ = handle_line(&words.join(" "), out);
             shell.last_status = 0;
         }
     }
