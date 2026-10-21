@@ -64,8 +64,12 @@ impl Env {
         }
     }
 
+    /// All variables, in insertion order.
+    pub fn vars(&self) -> &[Var] {
+        &self.vars
+    }
+
     /// Remove `name` if present; removing a missing variable is a no-op.
-    #[allow(dead_code)]
     pub fn unset(&mut self, name: &str) {
         self.vars.retain(|v| v.name != name);
     }
@@ -103,7 +107,6 @@ pub fn next_shlvl(old: Option<&str>) -> String {
 }
 
 /// True when `s` is a valid variable name: `[A-Za-z_][A-Za-z0-9_]*`, non-empty.
-#[allow(dead_code)]
 pub fn is_valid_name(s: &str) -> bool {
     let mut chars = s.chars();
     let Some(first) = chars.next() else {

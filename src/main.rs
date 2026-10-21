@@ -1,3 +1,4 @@
+mod builtins;
 mod env;
 mod exec;
 mod expand;
@@ -38,6 +39,11 @@ fn process_line(line: &str, shell: &mut shell::Shell, out: &mut dyn Write) {
                 shell.last_status = 0;
             } else {
                 let _ = out.flush();
+                if builtins::is_builtin(&words[0]) {
+                    shell.last_status = builtins::run(&words, shell, out);
+                    let _ = out.flush();
+                    return;
+                }
                 shell.last_status = match exec::path::resolve(&words[0], shell.env.get("PATH")) {
                     Err(e) => {
                         eprintln!("{}", e.message());
@@ -77,6 +83,10 @@ fn interactive(shell: &mut shell::Shell) {
                 let _ = rl.add_history_entry(line.as_str());
                 let mut out = io::stdout().lock();
                 process_line(&line, shell, &mut out);
+                if let Some(code) = shell.exit_code {
+                    let _ = io::stdout().flush();
+                    std::process::exit(code);
+                }
             }
             Err(rustyline::error::ReadlineError::Interrupted) => {
                 shell.last_status = 130;
@@ -112,6 +122,10 @@ fn non_interactive(shell: &mut shell::Shell) {
             continue;
         }
         process_line(&line, shell, &mut out);
+        if let Some(code) = shell.exit_code {
+            let _ = io::stdout().flush();
+            std::process::exit(code);
+        }
     }
     let _ = out.flush();
     std::process::exit(shell.last_status);

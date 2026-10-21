@@ -10,6 +10,8 @@ pub struct Shell {
     pub interactive: bool,
     /// Environment table (read by later M3 steps).
     pub env: Env,
+    /// Pending process exit code (set by the `exit` builtin).
+    pub exit_code: Option<i32>,
 }
 
 impl Shell {
@@ -18,6 +20,7 @@ impl Shell {
             last_status: 0,
             interactive: std::io::stdin().is_terminal(),
             env: Env::from_process(),
+            exit_code: None,
         }
     }
 }

@@ -64,3 +64,87 @@ fn smoke_blank_input_exit_zero() {
     let out = run("\n   \n");
     assert_eq!(out, (String::new(), 0));
 }
+
+#[test]
+fn smoke_echo_n_suppresses_newline() {
+    let (stdout, _code) = run("echo -n hi\n");
+    assert_eq!(stdout, "hi");
+}
+
+#[test]
+fn smoke_echo_n_flags() {
+    let (stdout, _code) = run("echo -nnn -n a -n\n");
+    assert_eq!(stdout, "a -n");
+}
+
+#[test]
+fn smoke_export_assignment() {
+    let (stdout, _code) = run("export A=1 B\necho $A\n");
+    assert_eq!(stdout, "1\n");
+}
+
+#[test]
+fn smoke_export_invalid_name() {
+    let (stdout, _code) = run("export 1A=x\necho $?\n");
+    assert_eq!(stdout, "1\n");
+}
+
+#[test]
+fn smoke_unset() {
+    let (stdout, _code) = run("unset HOME\necho $HOME.\n");
+    assert_eq!(stdout, ".\n");
+}
+
+#[test]
+fn smoke_cd_pwd() {
+    let (stdout, _code) = run("cd /tmp\npwd\n");
+    assert_eq!(stdout, "/tmp\n");
+}
+
+#[test]
+fn smoke_cd_missing_exit_one() {
+    let (stdout, _code) = run("cd /nonexistent_xyz\necho $?\n");
+    assert_eq!(stdout, "1\n");
+}
+
+#[test]
+fn smoke_cd_olddpwd() {
+    let (stdout, _code) = run("cd /tmp\ncd /\necho $OLDPWD\n");
+    assert_eq!(stdout, "/tmp\n");
+}
+
+#[test]
+fn smoke_exit_code() {
+    let (_stdout, code) = run("exit 42\n");
+    assert_eq!(code, 42);
+}
+
+#[test]
+fn smoke_exit_wraps_modulo_256() {
+    let (_stdout, code) = run("exit 300\n");
+    assert_eq!(code, 44);
+}
+
+#[test]
+fn smoke_exit_non_numeric_exit_two() {
+    let (_stdout, code) = run("exit abc\n");
+    assert_eq!(code, 2);
+}
+
+#[test]
+fn smoke_exit_too_many_args_keeps_running() {
+    let out = run("exit 1 2\necho $?\n");
+    assert_eq!(out, ("1\n".to_string(), 0));
+}
+
+#[test]
+fn smoke_env_lists_path() {
+    let (stdout, _code) = run("env\n");
+    assert!(stdout.lines().any(|l| l.starts_with("PATH=")));
+}
+
+#[test]
+fn smoke_external_false_exit_one() {
+    let (_stdout, code) = run("/bin/false\nexit\n");
+    assert_eq!(code, 1);
+}
