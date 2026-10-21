@@ -72,7 +72,6 @@ impl Env {
 
     /// `NAME=value` entries for exported variables that have a value.
     /// Entries containing NUL bytes are skipped.
-    #[allow(dead_code)]
     pub fn to_envp(&self) -> Vec<std::ffi::CString> {
         let mut out = Vec::new();
         for var in &self.vars {

@@ -1,8 +1,10 @@
 mod env;
+mod exec;
 mod expand;
 mod lexer;
 mod shell;
 mod signals;
+mod sys;
 
 use std::io::{self, BufRead, Write};
 
@@ -11,10 +13,6 @@ const PROMPT: &str = "minishell$ ";
 /// True when the line is empty or contains only spaces/tabs.
 fn is_blank(line: &str) -> bool {
     line.chars().all(|c| c == ' ' || c == '\t')
-}
-
-fn handle_line(line: &str, out: &mut dyn Write) -> io::Result<()> {
-    writeln!(out, "{line}")
 }
 
 fn process_line(line: &str, shell: &mut shell::Shell, out: &mut dyn Write) {
@@ -33,8 +31,21 @@ fn process_line(line: &str, shell: &mut shell::Shell, out: &mut dyn Write) {
                     _ => None,
                 })
                 .collect();
-            let _ = handle_line(&words.join(" "), out);
-            shell.last_status = 0;
+            if tokens.iter().any(|t| !matches!(t, lexer::Token::Word(_))) {
+                eprintln!("minishell: pipes and redirections are not implemented yet");
+                shell.last_status = 1;
+            } else if words.is_empty() {
+                shell.last_status = 0;
+            } else {
+                let _ = out.flush();
+                shell.last_status = match exec::path::resolve(&words[0], shell.env.get("PATH")) {
+                    Err(e) => {
+                        eprintln!("{}", e.message());
+                        e.status()
+                    }
+                    Ok(p) => sys::run_external(&p, &words, &shell.env.to_envp()),
+                };
+            }
         }
     }
 }
@@ -115,12 +126,5 @@ mod tests {
         assert!(is_blank(""));
         assert!(is_blank("   \t "));
         assert!(!is_blank("a"));
-    }
-
-    #[test]
-    fn handle_line_echoes_with_newline() {
-        let mut buf: Vec<u8> = Vec::new();
-        assert!(handle_line("hello", &mut buf).is_ok());
-        assert_eq!(buf, b"hello\n");
     }
 }

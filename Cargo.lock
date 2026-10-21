@@ -112,6 +112,7 @@ name = "minishell"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "libc",
  "nix 0.29.0",
  "rustyline",
  "thiserror",
