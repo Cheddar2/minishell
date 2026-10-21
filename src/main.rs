@@ -3,6 +3,7 @@ mod env;
 mod exec;
 mod expand;
 mod lexer;
+mod parser;
 mod shell;
 mod signals;
 mod sys;
@@ -22,38 +23,58 @@ fn process_line(line: &str, shell: &mut shell::Shell, out: &mut dyn Write) {
             eprintln!("minishell: syntax error: unclosed quote `{q}'");
             shell.last_status = 2;
         }
-        Ok(tokens) => {
-            let words: Vec<String> = tokens
-                .iter()
-                .filter_map(|t| match t {
-                    lexer::Token::Word(segs) => {
-                        expand::expand_word(segs, &shell.env, shell.last_status)
-                    }
-                    _ => None,
-                })
-                .collect();
-            if tokens.iter().any(|t| !matches!(t, lexer::Token::Word(_))) {
-                eprintln!("minishell: pipes and redirections are not implemented yet");
+        Ok(tokens) => match parser::parse(tokens) {
+            Err(parser::ParseError::Syntax(t)) => {
+                eprintln!("minishell: syntax error near unexpected token `{t}'");
+                shell.last_status = 2;
+            }
+            Ok(cmd) => run_simple(cmd, shell, out),
+        },
+    }
+}
+
+fn run_simple(cmd: parser::SimpleCmd, shell: &mut shell::Shell, out: &mut dyn Write) {
+    let words: Vec<String> = cmd
+        .argv
+        .iter()
+        .filter_map(|segs| expand::expand_word(segs, &shell.env, shell.last_status))
+        .collect();
+    let mut pairs: Vec<(parser::RedirKind, String)> = Vec::new();
+    for r in cmd.redirs {
+        match expand::expand_word(&r.target, &shell.env, shell.last_status) {
+            Some(t) => pairs.push((r.kind, t)),
+            None => {
+                eprintln!("minishell: ambiguous redirect");
                 shell.last_status = 1;
-            } else if words.is_empty() {
-                shell.last_status = 0;
-            } else {
-                let _ = out.flush();
-                if builtins::is_builtin(&words[0]) {
-                    shell.last_status = builtins::run(&words, shell, out);
-                    let _ = out.flush();
-                    return;
-                }
-                shell.last_status = match exec::path::resolve(&words[0], shell.env.get("PATH")) {
-                    Err(e) => {
-                        eprintln!("{}", e.message());
-                        e.status()
-                    }
-                    Ok(p) => sys::run_external(&p, &words, &shell.env.to_envp()),
-                };
+                return;
             }
         }
     }
+    let opened = match exec::redirect::open_all(&pairs) {
+        Ok(v) => v,
+        Err(msg) => {
+            eprintln!("{msg}");
+            shell.last_status = 1;
+            return;
+        }
+    };
+    if words.is_empty() {
+        shell.last_status = 0;
+        return;
+    }
+    let _ = out.flush();
+    if builtins::is_builtin(&words[0]) {
+        shell.last_status =
+            exec::redirect::run_builtin_redirected(&opened, || builtins::run(&words, shell, out));
+        return;
+    }
+    shell.last_status = match exec::path::resolve(&words[0], shell.env.get("PATH")) {
+        Err(e) => {
+            eprintln!("{}", e.message());
+            e.status()
+        }
+        Ok(p) => sys::run_external(&p, &words, &shell.env.to_envp(), opened),
+    };
 }
 
 fn main() {

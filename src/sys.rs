@@ -1,4 +1,5 @@
 use std::ffi::CString;
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
@@ -11,7 +12,12 @@ use crate::signals::{self, Mode};
 
 /// Fork, exec and wait for an external command.
 /// Returns the child's exit code, or 128 + signal if it was signaled.
-pub fn run_external(path: &Path, argv: &[String], envp: &[CString]) -> i32 {
+pub fn run_external(
+    path: &Path,
+    argv: &[String],
+    envp: &[CString],
+    redirs: Vec<(i32, std::os::fd::OwnedFd)>,
+) -> i32 {
     // Build every C string BEFORE forking so that no child process is
     // created when an argument is invalid.
     let cpath = match CString::new(path.as_os_str().as_bytes()) {
@@ -41,6 +47,9 @@ pub fn run_external(path: &Path, argv: &[String], envp: &[CString]) -> i32 {
     let status = match result {
         Ok(ForkResult::Child) => {
             signals::set_mode(Mode::Child);
+            for (target, fd) in &redirs {
+                let _ = nix::unistd::dup2(fd.as_raw_fd(), *target);
+            }
             unsafe {
                 // SAFETY: signal() with SIGPIPE/SigDfl uses a valid signal
                 // number and a valid handler; the child must behave like a

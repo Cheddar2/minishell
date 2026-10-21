@@ -148,3 +148,77 @@ fn smoke_external_false_exit_one() {
     let (_stdout, code) = run("/bin/false\nexit\n");
     assert_eq!(code, 1);
 }
+
+fn tmp(name: &str) -> String {
+    std::env::temp_dir()
+        .join(format!("m6_{name}_{}", std::process::id()))
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[test]
+fn smoke_redir_out_creates_file() {
+    let f = tmp("a");
+    run(&format!("echo hi > {f}\n"));
+    let content = std::fs::read_to_string(&f).unwrap();
+    assert_eq!(content, "hi\n");
+    let _ = std::fs::remove_file(&f);
+}
+
+#[test]
+fn smoke_redir_append() {
+    let f = tmp("b");
+    run(&format!("echo a > {f}\necho b >> {f}\n"));
+    let content = std::fs::read_to_string(&f).unwrap();
+    assert_eq!(content, "a\nb\n");
+    let _ = std::fs::remove_file(&f);
+}
+
+#[test]
+fn smoke_redir_in_feeds_cat() {
+    let f = tmp("c");
+    let (stdout, _code) = run(&format!("echo first > {f}\ncat < {f}\n"));
+    assert_eq!(stdout, "first\n");
+    let _ = std::fs::remove_file(&f);
+}
+
+#[test]
+fn smoke_redir_two_outs_last_wins() {
+    let f1 = tmp("d1");
+    let f2 = tmp("d2");
+    run(&format!("echo x > {f1} > {f2}\n"));
+    let c1 = std::fs::read_to_string(&f1).unwrap();
+    let c2 = std::fs::read_to_string(&f2).unwrap();
+    assert_eq!(c1, "");
+    assert_eq!(c2, "x\n");
+    let _ = std::fs::remove_file(&f1);
+    let _ = std::fs::remove_file(&f2);
+}
+
+#[test]
+fn smoke_redir_in_missing_file_status_one() {
+    let (stdout, _code) = run("cat < /nonexistent_m6_xyz\necho $?\n");
+    assert_eq!(stdout, "1\n");
+}
+
+#[test]
+fn smoke_bare_redir_creates_empty_file() {
+    let f = tmp("f");
+    let (_stdout, code) = run(&format!("> {f}\n"));
+    assert_eq!(code, 0);
+    let content = std::fs::read_to_string(&f).unwrap();
+    assert_eq!(content, "");
+    let _ = std::fs::remove_file(&f);
+}
+
+#[test]
+fn smoke_builtin_with_redir() {
+    let (stdout, _code) = run("export Z=zz > /dev/null\necho $Z\n");
+    assert_eq!(stdout, "zz\n");
+}
+
+#[test]
+fn smoke_dangling_redir_syntax_error() {
+    let (stdout, _code) = run("echo >\necho $?\n");
+    assert_eq!(stdout, "2\n");
+}
