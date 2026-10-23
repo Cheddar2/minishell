@@ -8,23 +8,30 @@ pub fn run(args: &[String], shell: &mut Shell, out: &mut dyn Write) -> i32 {
     if shell.interactive {
         eprintln!("exit");
     }
-    let code = if args.len() == 1 {
-        shell.last_status
-    } else {
-        match args[1].trim().parse::<i64>() {
-            Err(_) => {
-                eprintln!("minishell: exit: {}: numeric argument required", args[1]);
-                2
-            }
-            Ok(_) if args.len() > 2 => {
+    let args = &args[1..];
+    if args.is_empty() {
+        let code = shell.last_status;
+        shell.exit_code = Some(code);
+        return code;
+    }
+    let trimmed = args[0].trim();
+    match trimmed.parse::<i64>() {
+        Ok(value) => {
+            if args.len() > 1 {
                 eprintln!("minishell: exit: too many arguments");
                 return 1;
             }
-            Ok(n) => n.rem_euclid(256) as i32,
+            let code = (value % 256).rem_euclid(256);
+            let code = code as i32;
+            shell.exit_code = Some(code);
+            code
         }
-    };
-    shell.exit_code = Some(code);
-    code
+        Err(_) => {
+            eprintln!("minishell: exit: {}: numeric argument required", args[0]);
+            shell.exit_code = Some(2);
+            2
+        }
+    }
 }
 
 #[cfg(test)]

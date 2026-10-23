@@ -4,37 +4,54 @@ use crate::shell::Shell;
 
 /// Change the shell's working directory (bash `cd`).
 pub fn run(args: &[String], shell: &mut Shell, _out: &mut dyn Write) -> i32 {
-    if args.len() > 2 {
+    let args = &args[1..];
+    if args.len() > 1 {
         eprintln!("minishell: cd: too many arguments");
         return 1;
     }
-    let target = match args.get(1) {
-        Some(arg) => arg.clone(),
-        None => match shell.env.get("HOME") {
+    let target = if args.is_empty() {
+        match shell.env.get("HOME") {
             Some(home) => home.to_string(),
             None => {
                 eprintln!("minishell: cd: HOME not set");
                 return 1;
             }
-        },
+        }
+    } else {
+        args[0].clone()
     };
-    let old = match shell.env.get("PWD") {
-        Some(pwd) => pwd.to_string(),
-        None => std::env::current_dir()
-            .map(|dir| dir.to_string_lossy().into_owned())
-            .unwrap_or_default(),
-    };
-    if let Err(e) = nix::unistd::chdir(target.as_str()) {
-        eprintln!("minishell: cd: {target}: {}", e.desc());
+    let old = shell.env.get("PWD").map(str::to_string).or_else(|| {
+        std::env::current_dir()
+            .ok()
+            .and_then(|d| d.to_str().map(str::to_string))
+    });
+    if let Err(e) = std::env::set_current_dir(&target) {
+        let desc = nix::errno::Errno::from_raw(e.raw_os_error().unwrap_or(0)).desc();
+        eprintln!("minishell: cd: {target}: {desc}");
         return 1;
     }
-    shell.env.set("OLDPWD", Some(old), true);
-    if let Ok(dir) = std::env::current_dir() {
-        shell
-            .env
-            .set("PWD", Some(dir.to_string_lossy().into_owned()), true);
+    match std::env::current_dir() {
+        Ok(dir) => match dir.to_str() {
+            Some(new) => {
+                if let Some(old) = old {
+                    shell.env.set("OLDPWD", Some(old), true);
+                }
+                shell.env.set("PWD", Some(new.to_string()), true);
+                0
+            }
+            None => {
+                let e = std::io::Error::last_os_error();
+                let desc = nix::errno::Errno::from_raw(e.raw_os_error().unwrap_or(0)).desc();
+                eprintln!("minishell: cd: {target}: {desc}");
+                1
+            }
+        },
+        Err(e) => {
+            let desc = nix::errno::Errno::from_raw(e.raw_os_error().unwrap_or(0)).desc();
+            eprintln!("minishell: cd: {target}: {desc}");
+            1
+        }
     }
-    0
 }
 
 #[cfg(test)]

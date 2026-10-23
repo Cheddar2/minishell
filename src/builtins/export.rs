@@ -5,52 +5,62 @@ use crate::shell::Shell;
 
 /// List exported variables (no args) or mark variables as exported (with args).
 pub fn run(args: &[String], shell: &mut Shell, out: &mut dyn Write) -> i32 {
-    if args.len() == 1 {
-        let mut vars: Vec<_> = shell
-            .env
-            .vars()
-            .iter()
-            .filter(|v| v.exported && v.name != "_")
-            .collect();
-        vars.sort_by(|a, b| a.name.cmp(&b.name));
-        let mut status = 0;
-        for v in vars {
-            let line = match &v.value {
-                Some(value) => format!("declare -x {}=\"{}\"\n", v.name, escape(value)),
-                None => format!("declare -x {}\n", v.name),
-            };
-            if out.write_all(line.as_bytes()).is_err() {
-                status = 1;
-            }
-        }
-        return status;
+    let args = args.get(1..).unwrap_or(&[]);
+    if args.is_empty() {
+        let _ = list_exported(shell, out);
+        return 0;
     }
     let mut status = 0;
-    for arg in &args[1..] {
-        let (name, value) = arg
-            .split_once('=')
-            .map(|(n, v)| (n, Some(v)))
-            .unwrap_or((arg.as_str(), None));
-        if !is_valid_name(name) {
+    for arg in args {
+        let (name, value) = split_arg(arg);
+        if is_valid_name(name) {
+            shell.env.set(name, value, true);
+        } else {
             eprintln!("minishell: export: `{arg}': not a valid identifier");
             status = 1;
-            continue;
         }
-        shell.env.set(name, value.map(String::from), true);
     }
     status
 }
 
-/// Escape `"`, `\`, `$` and backtick with a backslash.
-fn escape(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
+/// Print `declare -x NAME="value"` (or bare `NAME`) for each exported
+/// variable except `_`, sorted by name.
+fn list_exported(shell: &Shell, out: &mut dyn Write) -> std::io::Result<()> {
+    let mut vars: Vec<&crate::env::Var> = shell
+        .env
+        .vars()
+        .iter()
+        .filter(|v| v.exported && v.name != "_")
+        .collect();
+    vars.sort_by(|a, b| a.name.cmp(&b.name));
+    for var in vars {
+        match &var.value {
+            Some(value) => writeln!(out, "declare -x {}=\"{}\"", var.name, escape_value(value))?,
+            None => writeln!(out, "declare -x {}", var.name)?,
+        }
+    }
+    Ok(())
+}
+
+/// Escape the characters `"`, `\\`, `$` and backtick with a backslash.
+fn escape_value(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
     for c in value.chars() {
         if matches!(c, '"' | '\\' | '$' | '`') {
-            out.push('\\');
+            escaped.push('\\');
         }
-        out.push(c);
+        escaped.push(c);
     }
-    out
+    escaped
+}
+
+/// Split `NAME=value` into its parts; no `=` means the whole arg is the name
+/// and no value is set.
+fn split_arg(arg: &str) -> (&str, Option<String>) {
+    match arg.split_once('=') {
+        Some((name, value)) => (name, Some(value.to_string())),
+        None => (arg, None),
+    }
 }
 
 #[cfg(test)]
