@@ -6,14 +6,14 @@ fn w(s: &str) -> Token {
 
 #[test]
 fn two_words() {
-    let cmd = parse(vec![w("ls"), w("-l")]).unwrap();
+    let cmd = &parse(vec![w("ls"), w("-l")]).unwrap()[0];
     assert_eq!(cmd.argv.len(), 2);
     assert!(cmd.redirs.is_empty());
 }
 
 #[test]
 fn redir_in() {
-    let cmd = parse(vec![w("cat"), Token::RedirIn, w("in")]).unwrap();
+    let cmd = &parse(vec![w("cat"), Token::RedirIn, w("in")]).unwrap()[0];
     assert_eq!(cmd.argv, vec![vec![Segment::Plain("cat".into())]]);
     assert_eq!(
         cmd.redirs,
@@ -26,7 +26,7 @@ fn redir_in() {
 
 #[test]
 fn redir_out() {
-    let cmd = parse(vec![w("ls"), Token::RedirOut, w("out")]).unwrap();
+    let cmd = &parse(vec![w("ls"), Token::RedirOut, w("out")]).unwrap()[0];
     assert_eq!(
         cmd.redirs,
         vec![Redir {
@@ -38,7 +38,7 @@ fn redir_out() {
 
 #[test]
 fn redir_append() {
-    let cmd = parse(vec![w("echo"), w("hi"), Token::Append, w("log")]).unwrap();
+    let cmd = &parse(vec![w("echo"), w("hi"), Token::Append, w("log")]).unwrap()[0];
     assert_eq!(cmd.argv.len(), 2);
     assert_eq!(
         cmd.redirs,
@@ -51,7 +51,7 @@ fn redir_append() {
 
 #[test]
 fn redir_before_command() {
-    let cmd = parse(vec![Token::RedirIn, w("in"), w("cat")]).unwrap();
+    let cmd = &parse(vec![Token::RedirIn, w("in"), w("cat")]).unwrap()[0];
     assert_eq!(cmd.argv, vec![vec![Segment::Plain("cat".into())]]);
     assert_eq!(
         cmd.redirs,
@@ -64,14 +64,14 @@ fn redir_before_command() {
 
 #[test]
 fn two_redir_in_in_order() {
-    let cmd = parse(vec![
+    let cmd = &parse(vec![
         w("cat"),
         Token::RedirIn,
         w("a"),
         Token::RedirIn,
         w("b"),
     ])
-    .unwrap();
+    .unwrap()[0];
     assert_eq!(
         cmd.redirs,
         vec![
@@ -89,7 +89,7 @@ fn two_redir_in_in_order() {
 
 #[test]
 fn two_redir_out_in_order() {
-    let cmd = parse(vec![
+    let cmd = &parse(vec![
         w("echo"),
         w("a"),
         Token::RedirOut,
@@ -97,7 +97,7 @@ fn two_redir_out_in_order() {
         Token::RedirOut,
         w("f2"),
     ])
-    .unwrap();
+    .unwrap()[0];
     assert_eq!(
         cmd.redirs,
         vec![
@@ -143,4 +143,75 @@ fn heredoc_not_supported() {
         parse(vec![w("cat"), Token::Heredoc, w("x")]),
         Err(ParseError::Syntax("<<".into()))
     );
+}
+
+#[test]
+fn pipe_two_commands() {
+    let cmds = parse(vec![w("ls"), Token::Pipe, w("wc")]).unwrap();
+    assert_eq!(cmds.len(), 2);
+}
+
+#[test]
+fn pipe_three_commands() {
+    let cmds = parse(vec![w("a"), Token::Pipe, w("b"), Token::Pipe, w("c")]).unwrap();
+    assert_eq!(cmds.len(), 3);
+}
+
+#[test]
+fn leading_pipe() {
+    assert_eq!(
+        parse(vec![Token::Pipe, w("ls")]),
+        Err(ParseError::Syntax("|".into()))
+    );
+}
+
+#[test]
+fn trailing_pipe() {
+    assert_eq!(
+        parse(vec![w("ls"), Token::Pipe]),
+        Err(ParseError::Syntax("|".into()))
+    );
+}
+
+#[test]
+fn consecutive_pipes() {
+    assert_eq!(
+        parse(vec![w("ls"), Token::Pipe, Token::Pipe, w("wc")]),
+        Err(ParseError::Syntax("|".into()))
+    );
+}
+
+#[test]
+fn pipe_with_redirs() {
+    let cmds = parse(vec![
+        w("cat"),
+        Token::RedirIn,
+        w("in"),
+        Token::Pipe,
+        w("wc"),
+        Token::RedirOut,
+        w("out"),
+    ])
+    .unwrap();
+    assert_eq!(cmds.len(), 2);
+    assert_eq!(
+        cmds[0].redirs,
+        vec![Redir {
+            kind: RedirKind::In,
+            target: vec![Segment::Plain("in".into())]
+        }]
+    );
+    assert_eq!(
+        cmds[1].redirs,
+        vec![Redir {
+            kind: RedirKind::Out,
+            target: vec![Segment::Plain("out".into())]
+        }]
+    );
+}
+
+#[test]
+fn empty_tokens() {
+    let cmds = parse(vec![]).unwrap();
+    assert_eq!(cmds.len(), 0);
 }

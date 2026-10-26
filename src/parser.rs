@@ -40,8 +40,37 @@ fn token_name(t: &Token) -> &'static str {
     }
 }
 
+/// Parse a token stream into a pipeline of simple commands.
+///
+/// Splits on `Token::Pipe`; any empty group (leading `|`, trailing `|`, or
+/// consecutive pipes) is a syntax error on `|`.
+pub fn parse(tokens: Vec<Token>) -> Result<Vec<SimpleCmd>, ParseError> {
+    let mut cmds = Vec::new();
+    let mut piece = Vec::new();
+    for token in tokens {
+        match token {
+            Token::Pipe => {
+                if piece.is_empty() {
+                    return Err(ParseError::Syntax("|".into()));
+                }
+                cmds.push(parse_simple(std::mem::take(&mut piece))?);
+            }
+            other => piece.push(other),
+        }
+    }
+    if piece.is_empty() {
+        if !cmds.is_empty() {
+            // Trailing `|` with nothing after it.
+            return Err(ParseError::Syntax("|".into()));
+        }
+        return Ok(cmds);
+    }
+    cmds.push(parse_simple(piece)?);
+    Ok(cmds)
+}
+
 /// Parse a token stream into a single simple command with its redirections.
-pub fn parse(tokens: Vec<Token>) -> Result<SimpleCmd, ParseError> {
+fn parse_simple(tokens: Vec<Token>) -> Result<SimpleCmd, ParseError> {
     let mut cmd = SimpleCmd::default();
     let mut i = 0;
     while i < tokens.len() {

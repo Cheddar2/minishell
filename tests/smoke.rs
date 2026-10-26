@@ -222,3 +222,99 @@ fn smoke_dangling_redir_syntax_error() {
     let (stdout, _code) = run("echo >\necho $?\n");
     assert_eq!(stdout, "2\n");
 }
+
+#[test]
+fn smoke_pipe_basic() {
+    let (stdout, code) = run("echo hello | cat\n");
+    assert_eq!(stdout, "hello\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn smoke_pipe_wc_count() {
+    let (stdout, _code) = run("echo a | wc -l\n");
+    assert_eq!(stdout.trim(), "1");
+}
+
+#[test]
+fn smoke_pipe_left_exit_code() {
+    let (stdout, _code) = run("echo x | false\necho $?\n");
+    assert_eq!(stdout, "1\n");
+}
+
+#[test]
+fn smoke_pipe_right_exit_code() {
+    let (stdout, _code) = run("false | echo y\necho $?\n");
+    assert_eq!(stdout, "y\n0\n");
+}
+
+#[test]
+fn smoke_pipe_left_not_found() {
+    let (stdout, _code) = run("nosuch_m7 | echo z\necho $?\n");
+    assert_eq!(stdout, "z\n0\n");
+}
+
+#[test]
+fn smoke_pipe_right_not_found() {
+    let (stdout, _code) = run("echo z | nosuch_m7\necho $?\n");
+    assert_eq!(stdout, "127\n");
+}
+
+#[test]
+fn smoke_pipe_terminates() {
+    let (stdout, _code) = run("yes | head -n 1\n");
+    assert_eq!(stdout, "y\n");
+}
+
+#[test]
+fn smoke_pipe_cd_then_pwd() {
+    let (stdout, _code) = run("cd / | echo ok\npwd\n");
+    let mut lines = stdout.lines();
+    let _ = lines.next();
+    let cwd = lines.next().unwrap().to_string();
+    let expected = std::env::current_dir()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(cwd, expected);
+}
+
+#[test]
+fn smoke_pipe_exit_is_not_special() {
+    let (stdout, code) = run("exit 5 | echo still\necho alive\n");
+    assert_eq!(stdout, "still\nalive\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn smoke_pipe_then_redir_to_file() {
+    let f = tmp("m7a");
+    let _ = run(&format!("echo hi | cat > {f}\n"));
+    let content = std::fs::read_to_string(&f).unwrap();
+    assert_eq!(content, "hi\n");
+    let _ = std::fs::remove_file(&f);
+}
+
+#[test]
+fn smoke_pipe_chain_of_three() {
+    let (_stdout, code) = run("cat | cat | ls /\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn smoke_pipe_dangling_left() {
+    let (stdout, _code) = run("ls |\necho $?\n");
+    assert_eq!(stdout, "2\n");
+}
+
+#[test]
+fn smoke_pipe_dangling_right() {
+    let (stdout, _code) = run("| ls\necho $?\n");
+    assert_eq!(stdout, "2\n");
+}
+
+#[test]
+fn smoke_pipe_no_trailing_newline() {
+    let (stdout, _code) = run("echo -n hi | cat\n");
+    assert_eq!(stdout, "hi");
+}

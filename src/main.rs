@@ -26,15 +26,93 @@ fn process_line(line: &str, shell: &mut shell::Shell, out: &mut dyn Write) {
             return;
         }
     };
-    let cmd = match parser::parse(tokens) {
-        Ok(cmd) => cmd,
+    let cmds = match parser::parse(tokens) {
+        Ok(cmds) => cmds,
         Err(parser::ParseError::Syntax(t)) => {
             eprintln!("minishell: syntax error near unexpected token `{t}'");
             shell.last_status = 2;
             return;
         }
     };
-    shell.last_status = run_command(&cmd, shell, out);
+    shell.last_status = run_pipeline(&cmds, shell, out);
+}
+
+/// Run the pipeline: empty is a no-op, one command runs as before, more
+/// than one is prepared as `sys::Stage`s and run as a real pipeline.
+fn run_pipeline(cmds: &[parser::SimpleCmd], shell: &mut shell::Shell, out: &mut dyn Write) -> i32 {
+    match cmds.len() {
+        0 => 0,
+        1 => run_command(&cmds[0], shell, out),
+        _ => {
+            let last_status = shell.last_status;
+            let mut stages = Vec::with_capacity(cmds.len());
+            for cmd in cmds {
+                // Expand words: words that expand to nothing disappear.
+                let argv: Vec<String> = cmd
+                    .argv
+                    .iter()
+                    .filter_map(|segs| expand::expand_word(segs, &shell.env, last_status))
+                    .collect();
+
+                // Expand redirection targets; a target that expands to
+                // nothing is an ambiguous redirect.
+                let mut redirs: Vec<(parser::RedirKind, String)> =
+                    Vec::with_capacity(cmd.redirs.len());
+                let mut ambiguous = false;
+                for redir in &cmd.redirs {
+                    match expand::expand_word(&redir.target, &shell.env, last_status) {
+                        Some(target) => redirs.push((redir_kind(&redir.kind), target)),
+                        None => ambiguous = true,
+                    }
+                }
+                let stage = if ambiguous {
+                    sys::Stage {
+                        kind: sys::StageKind::Failure {
+                            message: "minishell: ambiguous redirect".into(),
+                            status: 1,
+                        },
+                        redirs: Vec::new(),
+                    }
+                } else {
+                    match exec::redirect::open_all(&redirs) {
+                        Err(msg) => sys::Stage {
+                            kind: sys::StageKind::Failure {
+                                message: msg,
+                                status: 1,
+                            },
+                            redirs: Vec::new(),
+                        },
+                        Ok(opened) => {
+                            let kind = if argv.is_empty() {
+                                sys::StageKind::Empty
+                            } else if builtins::is_builtin(&argv[0]) {
+                                sys::StageKind::Builtin { argv }
+                            } else {
+                                match exec::path::resolve(&argv[0], shell.env.get("PATH")) {
+                                    Ok(path) => sys::StageKind::External {
+                                        path,
+                                        argv,
+                                        envp: shell.env.to_envp(),
+                                    },
+                                    Err(err) => sys::StageKind::Failure {
+                                        message: err.message(),
+                                        status: err.status(),
+                                    },
+                                }
+                            };
+                            sys::Stage {
+                                kind,
+                                redirs: opened,
+                            }
+                        }
+                    }
+                };
+                stages.push(stage);
+            }
+            let _ = out.flush();
+            sys::run_pipeline(stages, shell)
+        }
+    }
 }
 
 /// `RedirKind` has no `Clone`; rebuild it from the borrowed value.

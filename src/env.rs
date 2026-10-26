@@ -9,7 +9,7 @@ pub struct Var {
 }
 
 /// Environment table; the `Vec` keeps insertion order.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Env {
     vars: Vec<Var>,
 }
