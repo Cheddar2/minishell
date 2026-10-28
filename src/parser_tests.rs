@@ -19,7 +19,8 @@ fn redir_in() {
         cmd.redirs,
         vec![Redir {
             kind: RedirKind::In,
-            target: vec![Segment::Plain("in".into())]
+            target: vec![Segment::Plain("in".into())],
+            quoted: false
         }]
     );
 }
@@ -31,7 +32,8 @@ fn redir_out() {
         cmd.redirs,
         vec![Redir {
             kind: RedirKind::Out,
-            target: vec![Segment::Plain("out".into())]
+            target: vec![Segment::Plain("out".into())],
+            quoted: false
         }]
     );
 }
@@ -44,7 +46,8 @@ fn redir_append() {
         cmd.redirs,
         vec![Redir {
             kind: RedirKind::Append,
-            target: vec![Segment::Plain("log".into())]
+            target: vec![Segment::Plain("log".into())],
+            quoted: false
         }]
     );
 }
@@ -57,7 +60,8 @@ fn redir_before_command() {
         cmd.redirs,
         vec![Redir {
             kind: RedirKind::In,
-            target: vec![Segment::Plain("in".into())]
+            target: vec![Segment::Plain("in".into())],
+            quoted: false
         }]
     );
 }
@@ -77,11 +81,13 @@ fn two_redir_in_in_order() {
         vec![
             Redir {
                 kind: RedirKind::In,
-                target: vec![Segment::Plain("a".into())]
+                target: vec![Segment::Plain("a".into())],
+                quoted: false
             },
             Redir {
                 kind: RedirKind::In,
-                target: vec![Segment::Plain("b".into())]
+                target: vec![Segment::Plain("b".into())],
+                quoted: false
             }
         ]
     );
@@ -103,11 +109,13 @@ fn two_redir_out_in_order() {
         vec![
             Redir {
                 kind: RedirKind::Out,
-                target: vec![Segment::Plain("f1".into())]
+                target: vec![Segment::Plain("f1".into())],
+                quoted: false
             },
             Redir {
                 kind: RedirKind::Out,
-                target: vec![Segment::Plain("f2".into())]
+                target: vec![Segment::Plain("f2".into())],
+                quoted: false
             }
         ]
     );
@@ -138,10 +146,89 @@ fn pipe_not_supported() {
 }
 
 #[test]
-fn heredoc_not_supported() {
+fn heredoc_plain() {
+    let cmd = &parse(vec![w("cat"), Token::Heredoc, w("EOF")]).unwrap()[0];
+    assert_eq!(cmd.argv, vec![vec![Segment::Plain("cat".into())]]);
     assert_eq!(
-        parse(vec![w("cat"), Token::Heredoc, w("x")]),
-        Err(ParseError::Syntax("<<".into()))
+        cmd.redirs,
+        vec![Redir {
+            kind: RedirKind::Heredoc,
+            target: vec![Segment::Plain("EOF".into())],
+            quoted: false
+        }]
+    );
+}
+
+#[test]
+fn heredoc_single_quoted() {
+    let cmd = &parse(vec![
+        w("cat"),
+        Token::Heredoc,
+        Token::Word(vec![Segment::Single("EOF".into())]),
+    ])
+    .unwrap()[0];
+    assert_eq!(
+        cmd.redirs,
+        vec![Redir {
+            kind: RedirKind::Heredoc,
+            target: vec![Segment::Single("EOF".into())],
+            quoted: true
+        }]
+    );
+}
+
+#[test]
+fn heredoc_double_quoted() {
+    let cmd = &parse(vec![
+        w("cat"),
+        Token::Heredoc,
+        Token::Word(vec![Segment::Double("EOF".into())]),
+    ])
+    .unwrap()[0];
+    assert_eq!(
+        cmd.redirs,
+        vec![Redir {
+            kind: RedirKind::Heredoc,
+            target: vec![Segment::Double("EOF".into())],
+            quoted: true
+        }]
+    );
+}
+
+#[test]
+fn heredoc_mixed_quoted() {
+    let cmd = &parse(vec![
+        w("cat"),
+        Token::Heredoc,
+        Token::Word(vec![
+            Segment::Double("E".into()),
+            Segment::Plain("OF".into()),
+        ]),
+    ])
+    .unwrap()[0];
+    assert_eq!(
+        cmd.redirs,
+        vec![Redir {
+            kind: RedirKind::Heredoc,
+            target: vec![Segment::Double("E".into()), Segment::Plain("OF".into())],
+            quoted: true
+        }]
+    );
+}
+
+#[test]
+fn heredoc_dangling() {
+    assert_eq!(
+        parse(vec![Token::Heredoc]),
+        Err(ParseError::Syntax("newline".into()))
+    );
+}
+
+#[test]
+fn heredoc_followed_by_operator() {
+    assert_eq!(
+        parse(vec![w("cat"), Token::Heredoc, Token::RedirOut]),
+        Err(ParseError::Syntax(">".into()))
     );
 }
 
@@ -198,14 +285,16 @@ fn pipe_with_redirs() {
         cmds[0].redirs,
         vec![Redir {
             kind: RedirKind::In,
-            target: vec![Segment::Plain("in".into())]
+            target: vec![Segment::Plain("in".into())],
+            quoted: false
         }]
     );
     assert_eq!(
         cmds[1].redirs,
         vec![Redir {
             kind: RedirKind::Out,
-            target: vec![Segment::Plain("out".into())]
+            target: vec![Segment::Plain("out".into())],
+            quoted: false
         }]
     );
 }

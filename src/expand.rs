@@ -13,7 +13,7 @@ fn is_name_cont(c: char) -> bool {
 
 /// Scan one unquoted/double-quoted section for `$` expansions, appending
 /// the result to `out`.
-fn scan_into(s: &str, env: &Env, last_status: i32, out: &mut String) {
+pub(crate) fn scan_into(s: &str, env: &Env, last_status: i32, out: &mut String) {
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
         if c != '$' {

@@ -318,3 +318,51 @@ fn smoke_pipe_no_trailing_newline() {
     let (stdout, _code) = run("echo -n hi | cat\n");
     assert_eq!(stdout, "hi");
 }
+
+#[test]
+fn smoke_heredoc_basic() {
+    let (stdout, _code) = run("cat << E\nhello\nE\n");
+    assert_eq!(stdout, "hello\n");
+}
+
+#[test]
+fn smoke_heredoc_expansion() {
+    let (stdout, _code) = run("cat << E\n$HOME\nE\n");
+    assert_eq!(stdout, format!("{}\n", std::env::var("HOME").unwrap()));
+}
+
+#[test]
+fn smoke_heredoc_quoted_delimiter() {
+    let (stdout, _code) = run("cat << \"E\"\n$HOME\nE\n");
+    assert_eq!(stdout, "$HOME\n");
+}
+
+#[test]
+fn smoke_heredoc_last_wins() {
+    let (stdout, _code) = run("cat << A << B\nfirst\nA\nsecond\nB\n");
+    assert_eq!(stdout, "second\n");
+}
+
+#[test]
+fn smoke_heredoc_in_pipeline() {
+    let (stdout, _code) = run("cat << E | wc -l\na\nb\nc\nE\n");
+    assert_eq!(stdout.trim(), "3");
+}
+
+#[test]
+fn smoke_heredoc_eof_before_delimiter() {
+    let (stdout, _code) = run("cat << E\nonly\n");
+    assert_eq!(stdout, "only\n");
+}
+
+#[test]
+fn smoke_heredoc_missing_word() {
+    let (stdout, _code) = run("<<\necho $?\n");
+    assert!(stdout.contains("2"));
+}
+
+#[test]
+fn smoke_heredoc_command_after_delimiter() {
+    let (stdout, _code) = run("cat << E\nbody\nE\necho after\n");
+    assert_eq!(stdout, "body\nafter\n");
+}

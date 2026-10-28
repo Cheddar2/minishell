@@ -5,12 +5,17 @@ pub enum RedirKind {
     In,
     Out,
     Append,
+    Heredoc,
 }
 
 #[derive(Debug, PartialEq)]
 pub struct Redir {
     pub kind: RedirKind,
+    /// The redirection's word; for a heredoc this is the delimiter.
     pub target: Vec<Segment>,
+    /// Heredocs only: whether any part of the delimiter was quoted
+    /// (quoted delimiters make the body literal).
+    pub quoted: bool,
 }
 
 #[derive(Debug, PartialEq, Default)]
@@ -76,11 +81,12 @@ fn parse_simple(tokens: Vec<Token>) -> Result<SimpleCmd, ParseError> {
     while i < tokens.len() {
         match &tokens[i] {
             Token::Word(segs) => cmd.argv.push(segs.clone()),
-            Token::RedirIn | Token::RedirOut | Token::Append => {
+            Token::RedirIn | Token::RedirOut | Token::Append | Token::Heredoc => {
                 let kind = match &tokens[i] {
                     Token::RedirIn => RedirKind::In,
                     Token::RedirOut => RedirKind::Out,
-                    _ => RedirKind::Append,
+                    Token::Append => RedirKind::Append,
+                    _ => RedirKind::Heredoc,
                 };
                 i += 1;
                 if i >= tokens.len() {
@@ -88,9 +94,13 @@ fn parse_simple(tokens: Vec<Token>) -> Result<SimpleCmd, ParseError> {
                 }
                 match &tokens[i] {
                     Token::Word(segs) => {
+                        let quoted = segs
+                            .iter()
+                            .any(|s| matches!(s, Segment::Single(_) | Segment::Double(_)));
                         cmd.redirs.push(Redir {
                             kind,
                             target: segs.clone(),
+                            quoted,
                         });
                     }
                     other => return Err(ParseError::Syntax(token_name(other).into())),
