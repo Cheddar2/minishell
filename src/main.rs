@@ -43,11 +43,13 @@ fn prepare_cmd(
     per_cmd: &PerCmdHeredocs,
 ) -> StagePrep {
     let last_status = shell.last_status;
-    let argv: Vec<String> = cmd
-        .argv
-        .iter()
-        .filter_map(|segs| expand::expand_word(segs, &shell.env, last_status))
-        .collect();
+    // One word can split into several after expansion (see
+    // `expand::expand_word_split`); a word that expands to nothing
+    // contributes no entry and disappears.
+    let mut argv: Vec<String> = Vec::new();
+    for segs in &cmd.argv {
+        argv.extend(expand::expand_word_split(segs, &shell.env, last_status));
+    }
     let mut redirs: CmdRedirs = Vec::with_capacity(cmd.redirs.len());
     for (redir, herfd) in cmd.redirs.iter().zip(per_cmd) {
         if let Some(fd) = herfd {
@@ -67,15 +69,41 @@ fn prepare_cmd(
                 Err(msg) => return StagePrep::Fail(msg.clone()),
             }
         }
-        match expand::expand_word(&redir.target, &shell.env, last_status) {
-            Some(target) => redirs.push(CmdRedir::File(
-                exec::redirect::redir_kind(&redir.kind),
-                target,
-            )),
-            None => return StagePrep::Fail("minishell: ambiguous redirect".into()),
+        let mut target = expand::expand_word_split(&redir.target, &shell.env, last_status);
+        if target.len() != 1 {
+            return StagePrep::Fail(format!(
+                "minishell: {}: ambiguous redirect",
+                as_typed(&redir.target)
+            ));
         }
+        redirs.push(CmdRedir::File(
+            exec::redirect::redir_kind(&redir.kind),
+            target.remove(0),
+        ));
     }
     StagePrep::Run { argv, redirs }
+}
+
+/// Rebuild a word's original text ("as typed", quotes included): `Plain`
+/// segments as-is, `Double` wrapped in `"..."`, `Single` wrapped in `'...'`.
+fn as_typed(segs: &[lexer::Segment]) -> String {
+    let mut s = String::new();
+    for seg in segs {
+        match seg {
+            lexer::Segment::Plain(t) => s.push_str(t),
+            lexer::Segment::Double(t) => {
+                s.push('"');
+                s.push_str(t);
+                s.push('"');
+            }
+            lexer::Segment::Single(t) => {
+                s.push('\'');
+                s.push_str(t);
+                s.push('\'');
+            }
+        }
+    }
+    s
 }
 
 /// True when the line is empty or contains only spaces/tabs.

@@ -48,7 +48,9 @@ impl PathError {
 ///
 /// A `cmd` containing a `/` is used as-is. Otherwise each `:`-separated
 /// entry of `path_var` is searched and the first regular executable file
-/// wins. An empty `path_var` or `None` yields [`PathError::NotFound`].
+/// wins. When `PATH` is unset at all, the name is looked up as a file in
+/// the current directory (like bash); an empty `PATH` or a name missing
+/// from every `PATH` entry yields [`PathError::NotFound`].
 pub fn resolve(cmd: &str, path_var: Option<&str>) -> Result<PathBuf, PathError> {
     if cmd.is_empty() {
         return Err(PathError::NotFound(String::new()));
@@ -57,7 +59,8 @@ pub fn resolve(cmd: &str, path_var: Option<&str>) -> Result<PathBuf, PathError> 
         return resolve_explicit(cmd);
     }
     let Some(path_var) = path_var else {
-        return Err(PathError::NotFound(cmd.to_string()));
+        // `PATH` unset: look the name up in the current directory.
+        return resolve_explicit(cmd);
     };
     if path_var.is_empty() {
         return Err(PathError::NotFound(cmd.to_string()));

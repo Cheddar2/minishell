@@ -366,3 +366,24 @@ fn smoke_heredoc_command_after_delimiter() {
     let (stdout, _code) = run("cat << E\nbody\nE\necho after\n");
     assert_eq!(stdout, "body\nafter\n");
 }
+
+#[test]
+fn smoke_word_splitting_unquoted_expansion() {
+    let (stdout, code) = run("export A=\"x   y\"\necho $A\n");
+    assert_eq!(stdout, "x y\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn smoke_ambiguous_redirect_exit_1() {
+    let (stdout, code) = run("export A=\"a b\"\ncat < $A\necho $?\n");
+    assert_eq!(stdout, "1\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn smoke_unset_path_missing_command_exit_127() {
+    let (stdout, code) = run("unset PATH\nls\necho $?\n");
+    assert_eq!(stdout, "127\n");
+    assert_eq!(code, 0);
+}

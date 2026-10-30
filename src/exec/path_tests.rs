@@ -14,8 +14,22 @@ fn resolve_missing_path_entry_is_not_found() {
 }
 
 #[test]
-fn resolve_without_path_var_is_not_found() {
-    assert_eq!(resolve("ls", None), Err(PathError::NotFound("ls".into())));
+fn resolve_without_path_var_uses_current_dir() {
+    // `PATH` unset: the name is looked up in the current directory, so a
+    // missing name is "No such file or directory" (status 127), not
+    // "command not found".
+    assert_eq!(
+        resolve("nosuchcmd_xyz_1234", None),
+        Err(PathError::NoSuchFile("nosuchcmd_xyz_1234".into()))
+    );
+    // A file in the current directory is found.
+    assert!(
+        resolve("Cargo.toml", None).is_ok()
+            || matches!(
+                resolve("Cargo.toml", None),
+                Err(PathError::PermissionDenied(_)) | Err(PathError::IsDir(_))
+            )
+    );
 }
 
 #[test]
