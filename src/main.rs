@@ -10,7 +10,9 @@ mod signals;
 mod sys;
 
 use std::io::{self, BufRead, Write};
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+
+use nix::unistd::dup2;
 
 const PROMPT: &str = "minishell$ ";
 
@@ -125,14 +127,18 @@ fn process_line(
             return;
         }
     };
-    let cmds = match parser::parse(tokens) {
-        Ok(cmds) => cmds,
+    let tree = match parser::parse(tokens) {
+        Ok(tree) => tree,
         Err(parser::ParseError::Syntax(t)) => {
             eprintln!("minishell: syntax error near unexpected token `{t}'");
             shell.last_status = 2;
             return;
         }
     };
+    // Collect the line's simple commands in source order, across the
+    // whole tree (M10 step 2: heredocs are read before anything runs).
+    let mut cmds = Vec::new();
+    collect_cmds(&tree, &mut cmds);
     // Read every heredoc of the line, in order, before anything runs.
     let (heredocs, cancelled) = read_all_heredocs(&cmds, shell, next_line);
     if cancelled {
@@ -140,7 +146,264 @@ fn process_line(
         shell.last_status = 130;
         return;
     }
-    shell.last_status = run_pipeline(&cmds, shell, out, &heredocs);
+    shell.last_status = run_tree(&tree, &cmds, &heredocs, shell, out);
+}
+
+/// Append the tree's simple commands to `out` in source order, descending
+/// into subshell groups so their heredocs are read before anything runs.
+fn collect_cmds<'a>(tree: &'a parser::Tree, out: &mut Vec<&'a parser::SimpleCmd>) {
+    match tree {
+        parser::Tree::Empty => {}
+        parser::Tree::Pipeline(elems) => {
+            for e in elems {
+                match e {
+                    parser::Elem::Cmd(c) => out.push(c),
+                    parser::Elem::Group { tree: inner, .. } => collect_cmds(inner, out),
+                }
+            }
+        }
+        parser::Tree::List(left, _, right) => {
+            collect_cmds(left, out);
+            collect_cmds(right, out);
+        }
+    }
+}
+
+/// Number of simple commands in a subtree (groups count their inner ones).
+fn count_cmds(tree: &parser::Tree) -> usize {
+    match tree {
+        parser::Tree::Empty => 0,
+        parser::Tree::Pipeline(elems) => elems
+            .iter()
+            .map(|e| match e {
+                parser::Elem::Cmd(_) => 1,
+                parser::Elem::Group { tree: inner, .. } => count_cmds(inner),
+            })
+            .sum(),
+        parser::Tree::List(left, _, right) => count_cmds(left) + count_cmds(right),
+    }
+}
+
+/// Run a tree: a list runs its left side, then its right side only when
+/// the operator is satisfied (`&&`: status 0, `||`: status not 0); the
+/// status is that of the last part that ran. A pipeline runs as today.
+fn run_tree(
+    tree: &parser::Tree,
+    cmds: &[&parser::SimpleCmd],
+    heredocs: &[PerCmdHeredocs],
+    shell: &mut shell::Shell,
+    out: &mut dyn Write,
+) -> i32 {
+    match tree {
+        parser::Tree::Empty => 0,
+        parser::Tree::Pipeline(elems) => {
+            if elems
+                .iter()
+                .any(|e| matches!(e, parser::Elem::Group { .. }))
+            {
+                // A group alone in its pipeline runs in a subshell (step 3a);
+                // a group inside a longer pipeline waits for step 3b.
+                if let [parser::Elem::Group {
+                    tree: inner,
+                    redirs,
+                }] = elems.as_slice()
+                {
+                    let last_status = shell.last_status;
+                    let mut opened: Vec<(i32, OwnedFd)> = Vec::new();
+                    let mut fail: Option<String> = None;
+                    for redir in redirs {
+                        if fail.is_some() {
+                            break;
+                        }
+                        let mut target =
+                            expand::expand_word_split(&redir.target, &shell.env, last_status);
+                        if target.len() != 1 {
+                            fail = Some(format!(
+                                "minishell: {}: ambiguous redirect",
+                                as_typed(&redir.target)
+                            ));
+                            continue;
+                        }
+                        let file = exec::redirect::FileRedir::File(
+                            exec::redirect::redir_kind(&redir.kind),
+                            target.remove(0),
+                        );
+                        match exec::redirect::open_all(&[file]) {
+                            Ok(fds) => opened.extend(fds),
+                            Err(msg) => fail = Some(msg),
+                        }
+                    }
+                    return sys::fork_subshell(move || {
+                        if let Some(msg) = fail {
+                            eprintln!("{msg}");
+                            return 1;
+                        }
+                        for (target, fd) in opened.drain(..) {
+                            if dup2(fd.as_raw_fd(), target).is_err() {
+                                return 1;
+                            }
+                        }
+                        run_tree(inner, cmds, heredocs, shell, out)
+                    });
+                }
+                // A group inside a longer pipeline: one stage per element,
+                // group elements as `StageKind::Group` (step 3b).
+                let last_status = shell.last_status;
+                let mut stages = Vec::with_capacity(elems.len());
+                let mut idx = 0;
+                for e in elems {
+                    match e {
+                        parser::Elem::Cmd(cmd) => {
+                            let per_cmd = &heredocs[idx];
+                            idx += 1;
+                            let stage = match prepare_cmd(cmd, shell, per_cmd) {
+                                StagePrep::Fail(msg) => sys::Stage {
+                                    kind: sys::StageKind::Failure {
+                                        message: msg,
+                                        status: 1,
+                                    },
+                                    redirs: Vec::new(),
+                                },
+                                StagePrep::Run { argv, redirs } => {
+                                    match exec::redirect::open_all(&redirs) {
+                                        Err(msg) => sys::Stage {
+                                            kind: sys::StageKind::Failure {
+                                                message: msg,
+                                                status: 1,
+                                            },
+                                            redirs: Vec::new(),
+                                        },
+                                        Ok(opened) => {
+                                            let kind = if argv.is_empty() {
+                                                sys::StageKind::Empty
+                                            } else if builtins::is_builtin(&argv[0]) {
+                                                sys::StageKind::Builtin { argv }
+                                            } else {
+                                                match exec::path::resolve(
+                                                    &argv[0],
+                                                    shell.env.get("PATH"),
+                                                ) {
+                                                    Ok(path) => sys::StageKind::External {
+                                                        path,
+                                                        argv,
+                                                        envp: shell.env.to_envp(),
+                                                    },
+                                                    Err(err) => sys::StageKind::Failure {
+                                                        message: err.message(),
+                                                        status: err.status(),
+                                                    },
+                                                }
+                                            };
+                                            sys::Stage {
+                                                kind,
+                                                redirs: opened,
+                                            }
+                                        }
+                                    }
+                                }
+                            };
+                            stages.push(stage);
+                        }
+                        parser::Elem::Group {
+                            tree: inner,
+                            redirs,
+                        } => {
+                            let mut opened: Vec<(i32, OwnedFd)> = Vec::new();
+                            let mut fail: Option<String> = None;
+                            for redir in redirs {
+                                if fail.is_some() {
+                                    break;
+                                }
+                                let mut target = expand::expand_word_split(
+                                    &redir.target,
+                                    &shell.env,
+                                    last_status,
+                                );
+                                if target.len() != 1 {
+                                    fail = Some(format!(
+                                        "minishell: {}: ambiguous redirect",
+                                        as_typed(&redir.target)
+                                    ));
+                                    continue;
+                                }
+                                let file = exec::redirect::FileRedir::File(
+                                    exec::redirect::redir_kind(&redir.kind),
+                                    target.remove(0),
+                                );
+                                match exec::redirect::open_all(&[file]) {
+                                    Ok(fds) => opened.extend(fds),
+                                    Err(msg) => fail = Some(msg),
+                                }
+                            }
+                            let n = count_cmds(inner);
+                            let cmds_slice = &cmds[idx..idx + n];
+                            let heredocs_slice = &heredocs[idx..idx + n];
+                            idx += n;
+                            // The closure borrows the group's inner tree and
+                            // this pipeline's cmd/heredoc slices; it runs only
+                            // in the forked child, where the parent's borrows
+                            // are gone, so the shared borrows are sound.
+                            let kind = sys::StageKind::Group(Box::new(
+                                move |child_shell: &mut shell::Shell| {
+                                    if let Some(msg) = fail {
+                                        eprintln!("{msg}");
+                                        return 1;
+                                    }
+                                    // A locked `StdoutLock` stands in for the
+                                    // parent's `out`; flushed explicitly since
+                                    // the child dies with `_exit` afterwards.
+                                    let mut out = std::io::stdout().lock();
+                                    let status = run_tree(
+                                        inner,
+                                        cmds_slice,
+                                        heredocs_slice,
+                                        child_shell,
+                                        &mut out,
+                                    );
+                                    let _ = std::io::Write::flush(&mut out);
+                                    status
+                                },
+                            ));
+                            stages.push(sys::Stage {
+                                kind,
+                                redirs: opened,
+                            });
+                        }
+                    }
+                }
+                let _ = out.flush();
+                return sys::run_pipeline(stages, shell);
+            }
+            run_pipeline(cmds, shell, out, heredocs)
+        }
+        parser::Tree::List(left, op, right) => {
+            let left_count = count_cmds(left);
+            let status = run_tree(
+                left,
+                &cmds[..left_count],
+                &heredocs[..left_count],
+                shell,
+                out,
+            );
+            shell.last_status = status;
+            let run_right = match op {
+                parser::ListOp::And => status == 0,
+                parser::ListOp::Or => status != 0,
+            };
+            if !run_right {
+                return status;
+            }
+            let status = run_tree(
+                right,
+                &cmds[left_count..],
+                &heredocs[left_count..],
+                shell,
+                out,
+            );
+            shell.last_status = status;
+            status
+        }
+    }
 }
 
 /// One line read by the input source while reading heredoc bodies.
@@ -157,7 +420,7 @@ enum SourceLine {
 /// command (`None` for non-heredoc redirs), plus whether an interrupt
 /// aborted the reads.
 fn read_all_heredocs(
-    cmds: &[parser::SimpleCmd],
+    cmds: &[&parser::SimpleCmd],
     shell: &shell::Shell,
     next_line: &mut dyn FnMut() -> SourceLine,
 ) -> (PipelineHeredocs, bool) {
@@ -208,19 +471,14 @@ fn read_all_heredocs(
 /// Run the pipeline: empty is a no-op, one command runs as before, more
 /// than one is prepared as `sys::Stage`s and run as a real pipeline.
 fn run_pipeline(
-    cmds: &[parser::SimpleCmd],
+    cmds: &[&parser::SimpleCmd],
     shell: &mut shell::Shell,
     out: &mut dyn Write,
-    heredocs: &PipelineHeredocs,
+    heredocs: &[PerCmdHeredocs],
 ) -> i32 {
     match cmds.len() {
         0 => 0,
-        1 => run_command(
-            &cmds[0],
-            shell,
-            out,
-            heredocs.first().unwrap_or(&Vec::new()),
-        ),
+        1 => run_command(cmds[0], shell, out, heredocs.first().unwrap_or(&Vec::new())),
         _ => {
             let mut stages = Vec::with_capacity(cmds.len());
             for (cmd, per_cmd) in cmds.iter().zip(heredocs) {

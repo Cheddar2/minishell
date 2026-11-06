@@ -60,6 +60,58 @@ fn smoke_false_exit_1() {
 }
 
 #[test]
+fn smoke_and_runs_right_when_left_ok() {
+    let (stdout, _code) = run("true && echo a\n");
+    assert_eq!(stdout, "a\n");
+}
+
+#[test]
+fn smoke_and_skips_right_when_left_fails() {
+    let (stdout, _code) = run("false && echo a\necho $?\n");
+    assert_eq!(stdout, "1\n");
+}
+
+#[test]
+fn smoke_or_runs_right_when_left_fails() {
+    let (stdout, _code) = run("false || echo b\n");
+    assert_eq!(stdout, "b\n");
+}
+
+#[test]
+fn smoke_or_skips_right_when_left_ok() {
+    let (stdout, _code) = run("true || echo b\necho $?\n");
+    assert_eq!(stdout, "0\n");
+}
+
+#[test]
+fn smoke_mixed_list_short_circuits_left_to_right() {
+    // `false || false && echo c` = `(false || false) && echo c`: both `||`
+    // sides ran, left side's status is 1, so `echo c` is skipped.
+    let (stdout, _code) = run("false || false && echo c\necho $?\n");
+    assert_eq!(stdout, "1\n");
+}
+
+#[test]
+fn smoke_mixed_list_runs_all_when_ok() {
+    // `true || false && echo d` = `(true || false) && echo d`: left side
+    // short-circuits on `true` (status 0), so `echo d` runs.
+    let (stdout, _code) = run("true || false && echo d\n");
+    assert_eq!(stdout, "d\n");
+}
+
+#[test]
+fn smoke_pipeline_then_and() {
+    let (stdout, _code) = run("echo x | cat && echo y\n");
+    assert_eq!(stdout, "x\ny\n");
+}
+
+#[test]
+fn smoke_heredoc_then_and() {
+    let (stdout, _code) = run("cat << E && echo z\nbody\nE\n");
+    assert_eq!(stdout, "body\nz\n");
+}
+
+#[test]
 fn smoke_blank_input_exit_zero() {
     let out = run("\n   \n");
     assert_eq!(out, (String::new(), 0));
@@ -385,5 +437,19 @@ fn smoke_ambiguous_redirect_exit_1() {
 fn smoke_unset_path_missing_command_exit_127() {
     let (stdout, code) = run("unset PATH\nls\necho $?\n");
     assert_eq!(stdout, "127\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn smoke_group_left_of_pipe() {
+    let (stdout, code) = run("(echo a && echo b) | cat\n");
+    assert_eq!(stdout, "a\nb\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn smoke_group_right_of_pipe() {
+    let (stdout, code) = run("echo x | (cat && echo y)\n");
+    assert_eq!(stdout, "x\ny\n");
     assert_eq!(code, 0);
 }

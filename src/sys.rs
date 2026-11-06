@@ -1,4 +1,5 @@
 use std::ffi::CString;
+use std::io::Write as _;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::Path;
 
@@ -9,7 +10,7 @@ use nix::unistd::{dup2, execve, fork, pipe, ForkResult, Pid};
 use crate::signals::{self, Mode};
 
 /// The kind of command one pipeline stage runs.
-pub enum StageKind {
+pub enum StageKind<'a> {
     /// An external program: resolved path plus argv.
     External {
         path: std::path::PathBuf,
@@ -23,12 +24,16 @@ pub enum StageKind {
     Failure { message: String, status: i32 },
     /// An empty stage (only redirections): exits with 0.
     Empty,
+    /// A `( ... )` group: the closure runs the group's inner tree in this
+    /// child (after the pipe/redirect wiring) and its return value is the
+    /// child's exit status.
+    Group(Box<dyn FnOnce(&mut crate::shell::Shell) -> i32 + 'a>),
 }
 
 /// One prepared stage of a pipeline: its command plus its opened
 /// redirections (fd number, opened file), applied after the pipe connections.
-pub struct Stage {
-    pub kind: StageKind,
+pub struct Stage<'a> {
+    pub kind: StageKind<'a>,
     pub redirs: Vec<(i32, OwnedFd)>,
 }
 
@@ -64,7 +69,27 @@ fn prepare_c_args(path: &Path, argv: &[String]) -> Option<(CString, Vec<CString>
 
 /// Child-side cleanup: use `libc::_exit` so that no Rust destructors run and
 /// we never return into the REPL.
-fn child_die(status: i32) -> ! {
+pub(crate) fn fork_subshell(run: impl FnOnce() -> i32) -> i32 {
+    // SAFETY: fork() is async-signal-safe; the child only runs `run()` after
+    // resetting its signal handling, and the parent only reads the returned
+    // pid before waiting for the child.
+    match unsafe { fork() } {
+        Ok(ForkResult::Parent { child }) => wait_child(child),
+        Ok(ForkResult::Child) => {
+            // Child: reset signal handling, run the group, then exit.
+            signals::set_mode(Mode::Child);
+            let status = run();
+            let _ = std::io::stdout().flush();
+            child_die(status);
+        }
+        Err(err) => {
+            eprintln!("minishell: fork: {err}");
+            1
+        }
+    }
+}
+
+pub(crate) fn child_die(status: i32) -> ! {
     unsafe {
         // SAFETY: `_exit` terminates the process; `status` is a valid exit
         // code and there are no resources left to release.
@@ -76,7 +101,7 @@ fn child_die(status: i32) -> ! {
 /// and turn its outcome into a shell status: the exit code, or 128 + signal
 /// (with the SIGINT newline / SIGQUIT message). On a hard waitpid error the
 /// prompt handlers are restored and 1 is returned.
-fn wait_child(pid: Pid) -> i32 {
+pub(crate) fn wait_child(pid: Pid) -> i32 {
     loop {
         let status = loop {
             match waitpid(pid, None) {
@@ -107,7 +132,7 @@ fn wait_child(pid: Pid) -> i32 {
 }
 
 /// One stage with all its `CString`s already built (before any fork).
-enum Prepared {
+enum Prepared<'a> {
     External {
         path: CString,
         argv: Vec<CString>,
@@ -121,11 +146,12 @@ enum Prepared {
         status: i32,
     },
     Empty,
+    Group(Box<dyn FnOnce(&mut crate::shell::Shell) -> i32 + 'a>),
 }
 
 /// Child-side plumbing for one stage of a pipeline. Never returns.
-fn child_run_pipeline(
-    prep: &Prepared,
+fn child_run_pipeline<'a>(
+    prep: Prepared<'a>,
     mut redirs: Vec<(i32, OwnedFd)>,
     prev_read: Option<OwnedFd>,
     pipe: Option<(OwnedFd, OwnedFd)>,
@@ -171,7 +197,7 @@ fn child_run_pipeline(
             argv: c_argv,
             envp,
         } => {
-            if execve(c_path, c_argv, envp).is_err() {
+            if execve(&c_path, &c_argv, &envp).is_err() {
                 // execve failed: end immediately with 126, no destructors.
                 child_die(126);
             }
@@ -182,7 +208,7 @@ fn child_run_pipeline(
             // `child_die` uses `_exit`, flush explicitly or output without a
             // trailing newline is lost.
             let mut out = std::io::stdout().lock();
-            let status = crate::builtins::run(argv, shell, &mut out);
+            let status = crate::builtins::run(&argv, shell, &mut out);
             let _ = std::io::Write::flush(&mut out);
             drop(out);
             child_die(status);
@@ -193,17 +219,26 @@ fn child_run_pipeline(
             if !message.is_empty() {
                 eprintln!("{message}");
             }
-            child_die(*status);
+            child_die(status);
         }
         Prepared::Empty => child_die(0),
+        Prepared::Group(run) => {
+            // The pipe/redirect wiring above is already in place; run the
+            // group's inner tree and exit with its status. Flush like the
+            // builtin case: the child dies with `_exit`, so destructors
+            // would not flush stdout for us.
+            let status = run(shell);
+            let _ = std::io::stdout().flush();
+            child_die(status);
+        }
     }
 }
 
 /// Run every stage of a pipeline and return the last stage's status.
-pub fn run_pipeline(stages: Vec<Stage>, shell: &mut crate::shell::Shell) -> i32 {
+pub fn run_pipeline<'a>(stages: Vec<Stage<'a>>, shell: &mut crate::shell::Shell) -> i32 {
     // Build every `CString` before the first fork, so no allocation happens
     // in the child; a NUL byte turns that stage into a status-1 failure.
-    let mut prepared: Vec<(Prepared, Vec<(i32, OwnedFd)>)> = Vec::with_capacity(stages.len());
+    let mut prepared: Vec<(Prepared<'a>, Vec<(i32, OwnedFd)>)> = Vec::with_capacity(stages.len());
     for stage in stages {
         let entry = match stage.kind {
             StageKind::External { path, argv, envp } => match prepare_c_args(&path, &argv) {
@@ -228,6 +263,7 @@ pub fn run_pipeline(stages: Vec<Stage>, shell: &mut crate::shell::Shell) -> i32 
                 (Prepared::Failure { message, status }, stage.redirs)
             }
             StageKind::Empty => (Prepared::Empty, stage.redirs),
+            StageKind::Group(run) => (Prepared::Group(run), stage.redirs),
         };
         prepared.push(entry);
     }
@@ -237,7 +273,7 @@ pub fn run_pipeline(stages: Vec<Stage>, shell: &mut crate::shell::Shell) -> i32 
     let mut prev_read: Option<OwnedFd> = None;
     let mut failed = false;
     let total = prepared.len();
-    for (idx, (prep, redirs)) in prepared.iter_mut().enumerate() {
+    for (idx, (prep, redirs)) in prepared.into_iter().enumerate() {
         let pipe = if idx + 1 < total {
             match pipe() {
                 Ok(p) => Some(p),
@@ -257,7 +293,7 @@ pub fn run_pipeline(stages: Vec<Stage>, shell: &mut crate::shell::Shell) -> i32 
         } {
             Ok(ForkResult::Parent { child }) => child,
             Ok(ForkResult::Child) => {
-                child_run_pipeline(prep, std::mem::take(redirs), prev_read.take(), pipe, shell);
+                child_run_pipeline(prep, redirs, prev_read.take(), pipe, shell);
             }
             Err(err) => {
                 eprintln!("minishell: fork: {err}");
