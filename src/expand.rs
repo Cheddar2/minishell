@@ -1,7 +1,71 @@
-//! Variable expansion + quote removal (M3 Step 2).
+//! Variable expansion + quote removal (M3 Step 2) + wildcard `*` (M11).
 
 use crate::env::Env;
 use crate::lexer::Segment;
+use std::fs::read_dir;
+
+/// M11 wildcard matcher: does `name` match `pattern`, where `*` matches
+/// any string (including the empty one) and every other character is
+/// literal? Shell rules: a name starting with `.` matches only a pattern
+/// that starts with `.`, and `.`/`..` never match at all.
+/// M11 wildcard matcher: does `name` match the pattern? `wilds[i]` says
+/// whether `pattern[i]` is a `*` that acts as "any string" (unquoted); a
+/// `*` with `wilds[i] == false` is a literal star character.
+/// Shell rules: `.` and `..` never match; a name starting with `.`
+/// matches only when the pattern starts with `.`.
+pub fn glob_match(pattern: &str, wilds: &[bool], name: &str) -> bool {
+    if name == "." || name == ".." {
+        return false;
+    }
+    let name_hidden = name.starts_with('.');
+    if name_hidden && !pattern.starts_with('.') {
+        return false;
+    }
+    let p: Vec<char> = pattern.chars().collect();
+    let n: Vec<char> = name.chars().collect();
+    debug_assert_eq!(p.len(), wilds.len());
+    let (mut pi, mut ni) = (0usize, 0usize);
+    let (mut star, mut mark) = (None, 0usize);
+    while ni < n.len() {
+        if pi < p.len() && p[pi] == n[ni] {
+            pi += 1;
+            ni += 1;
+        } else if pi < p.len() && p[pi] == '*' && wilds[pi] {
+            star = Some(pi);
+            mark = ni;
+            pi += 1;
+        } else if let Some(s) = star {
+            mark += 1;
+            ni = mark;
+            pi = s + 1;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == '*' && wilds[pi] {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
+/// M11: names in `dir` matching `pattern` (via `glob_match`; see its
+/// rules for `wilds`), sorted in byte order. `dir` is used as given
+/// ("." = the current directory); an unreadable directory yields an
+/// empty list.
+pub fn dir_matches(dir: &str, pattern: &str, wilds: &[bool]) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(entries) = read_dir(dir) {
+        for e in entries.flatten() {
+            if let Ok(file_name) = e.file_name().into_string() {
+                if glob_match(pattern, wilds, &file_name) {
+                    out.push(file_name);
+                }
+            }
+        }
+    }
+    out.sort();
+    out
+}
 
 fn is_name_start(c: char) -> bool {
     c.is_ascii_alphabetic() || c == '_'
@@ -86,24 +150,33 @@ fn is_ws(c: char) -> bool {
     c == ' ' || c == '\t' || c == '\n'
 }
 
+/// One word under construction: its final text, and for every `*` in it
+/// whether it is unquoted (M11: only unquoted `*` act as wildcards; quoted
+/// ones must stay literal in the pattern).
+type Word = (String, Vec<bool>);
+
 /// Append one chunk of text to the word list. `open` is true while the
 /// last pushed chunk is unquoted and can still be joined by the next
-/// chunk without starting a new word.
-pub(crate) fn push_chunk(words: &mut Vec<String>, s: &str, open: &mut bool) {
+/// chunk without starting a new word. `wild` is true when the chunk holds
+/// an unquoted `*` that must stay a wildcard (literal text or text coming
+/// from a variable expansion).
+pub(crate) fn push_chunk(words: &mut Vec<Word>, s: &str, open: &mut bool, wild: bool) {
+    let wilds: Vec<bool> = s.chars().map(|c| c == '*' && wild).collect();
     if *open {
         if let Some(last) = words.last_mut() {
-            last.push_str(s);
+            last.0.push_str(s);
+            last.1.extend(wilds);
         } else {
-            words.push(s.to_string());
+            words.push((s.to_string(), wilds));
             *open = true;
         }
     } else if !s.is_empty() {
-        words.push(s.to_string());
+        words.push((s.to_string(), wilds));
         *open = true;
     } else {
         // Empty chunk (e.g. `''`): opens a (possibly empty) word that
         // later chunks may join.
-        words.push(String::new());
+        words.push((String::new(), Vec::new()));
         *open = true;
     }
 }
@@ -113,8 +186,9 @@ pub(crate) fn push_chunk(words: &mut Vec<String>, s: &str, open: &mut bool) {
 /// run (interior or trailing) closes the open word, since the next
 /// non-empty piece starts a new word; leading whitespace (with no open
 /// word) starts nothing. The last non-empty piece leaves the word open,
-/// so later chunks (e.g. quoted text) join it.
-pub(crate) fn push_split(words: &mut Vec<String>, s: &str, open: &mut bool) {
+/// so later chunks (e.g. quoted text) join it. A piece counts as
+/// `wild` when it contains an unquoted `*`.
+pub(crate) fn push_split(words: &mut Vec<Word>, s: &str, open: &mut bool) {
     let mut seen_piece = false;
     for p in s.split(is_ws) {
         if p.is_empty() {
@@ -126,7 +200,7 @@ pub(crate) fn push_split(words: &mut Vec<String>, s: &str, open: &mut bool) {
             if seen_piece {
                 *open = false;
             }
-            push_chunk(words, p, open);
+            push_chunk(words, p, open, p.contains('*'));
             seen_piece = true;
         }
     }
@@ -145,15 +219,21 @@ pub(crate) fn push_split(words: &mut Vec<String>, s: &str, open: &mut bool) {
 /// and everything inside quotes is never split. Runs of whitespace count
 /// as one separator and never create empty words. A word with no quoted
 /// segments that expands to nothing disappears.
+///
+/// M11 wildcard: a word that contains an unquoted `*` (in literal text or
+/// text that came from a variable) is matched against the current
+/// directory and replaced by the sorted matches; with no match it stays
+/// literally as written. Quoted `*` is never a wildcard, and a word
+/// containing `/` is left as is.
 pub fn expand_word_split(segs: &[Segment], env: &Env, last_status: i32) -> Vec<String> {
-    let mut words: Vec<String> = Vec::new();
+    let mut words: Vec<Word> = Vec::new();
     let mut open = false;
     let mut has_quoted = false;
     for seg in segs {
         match seg {
             Segment::Single(s) => {
                 has_quoted = true;
-                push_chunk(&mut words, s, &mut open);
+                push_chunk(&mut words, s, &mut open, false);
                 // A quoted segment never starts a new word on its own; the
                 // word it lands in stays open so the next unquoted segment
                 // (e.g. the `x` in `"$HOME"x`) joins it, as in bash.
@@ -162,7 +242,7 @@ pub fn expand_word_split(segs: &[Segment], env: &Env, last_status: i32) -> Vec<S
                 has_quoted = true;
                 let mut t = String::new();
                 scan_into(s, env, last_status, &mut t);
-                push_chunk(&mut words, &t, &mut open);
+                push_chunk(&mut words, &t, &mut open, false);
             }
             Segment::Plain(s) => {
                 // Walk the segment, splitting only text that came from an
@@ -175,6 +255,7 @@ pub fn expand_word_split(segs: &[Segment], env: &Env, last_status: i32) -> Vec<S
                     if buf.contains('$') {
                         let mut t = String::new();
                         scan_into(buf, env, last_status, &mut t);
+                        // `*` coming from an expansion IS a wildcard in bash.
                         push_split(&mut words, &t, &mut open);
                     } else {
                         // Unquoted literal text is also subject to word
@@ -214,11 +295,23 @@ pub fn expand_word_split(segs: &[Segment], env: &Env, last_status: i32) -> Vec<S
         }
     }
     if words.is_empty() && has_quoted {
-        words.push(String::new());
+        words.push((String::new(), Vec::new()));
     } else {
-        words.retain(|w| !w.is_empty() || has_quoted);
+        words.retain(|(w, _)| !w.is_empty() || has_quoted);
     }
-    words
+    let mut out: Vec<String> = Vec::with_capacity(words.len());
+    for (word, wilds) in words {
+        let word_wild = wilds.iter().any(|w| *w);
+        if word_wild && !word.contains('/') {
+            let matches = dir_matches(".", &word, &wilds);
+            if !matches.is_empty() {
+                out.extend(matches);
+                continue;
+            }
+        }
+        out.push(word);
+    }
+    out
 }
 
 #[cfg(test)]

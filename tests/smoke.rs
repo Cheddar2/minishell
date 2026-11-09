@@ -453,3 +453,143 @@ fn smoke_group_right_of_pipe() {
     assert_eq!(stdout, "x\ny\n");
     assert_eq!(code, 0);
 }
+
+fn wild_temp_dir(tag: &str) -> std::path::PathBuf {
+    let mut p = std::env::temp_dir();
+    p.push(format!("minishell_wild_{}_{tag}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&p);
+    std::fs::create_dir_all(&p).unwrap();
+    p
+}
+
+fn wild_touch(dir: &std::path::Path, name: &str) {
+    std::fs::write(dir.join(name), b"seed\n").unwrap();
+}
+
+#[test]
+fn smoke_wildcard_star_matches_visible_sorted() {
+    let dir = wild_temp_dir("star");
+    wild_touch(&dir, "z.rs");
+    wild_touch(&dir, "b.txt");
+    wild_touch(&dir, "a.rs");
+    wild_touch(&dir, ".hidden");
+    let (stdout, _code) = run(&format!("cd {}\necho *\n", dir.display()));
+    assert_eq!(stdout, "a.rs b.txt z.rs\n");
+}
+
+#[test]
+fn smoke_wildcard_hidden_only_with_dot() {
+    let dir = wild_temp_dir("hidden");
+    wild_touch(&dir, ".git");
+    wild_touch(&dir, ".env");
+    wild_touch(&dir, "a");
+    let (stdout, _code) = run(&format!("cd {}\necho .*\n", dir.display()));
+    assert_eq!(stdout, ".env .git\n");
+}
+
+#[test]
+fn smoke_wildcard_prefix_suffix_and_multi_star() {
+    let dir = wild_temp_dir("patterns");
+    wild_touch(&dir, "a.rs");
+    wild_touch(&dir, "ab.rs");
+    wild_touch(&dir, "b.c");
+    wild_touch(&dir, "xab.c");
+    wild_touch(&dir, "a");
+    let (stdout, _code) = run(&format!(
+        "cd {}\necho *.rs\necho a*\necho *b*\necho a**\n",
+        dir.display()
+    ));
+    assert_eq!(
+        stdout,
+        "a.rs ab.rs\na a.rs ab.rs\nab.rs b.c xab.c\na a.rs ab.rs\n"
+    );
+}
+
+#[test]
+fn smoke_wildcard_word_with_slash_left_as_is() {
+    let dir = wild_temp_dir("slash");
+    wild_touch(&dir, "a");
+    let (stdout, _code) = run(&format!("cd {}\necho ./a*\n", dir.display()));
+    assert_eq!(stdout, "./a*\n");
+}
+
+#[test]
+fn smoke_wildcard_no_match_stays_literal() {
+    let dir = wild_temp_dir("nomatch");
+    wild_touch(&dir, "a");
+    let (stdout, _code) = run(&format!("cd {}\necho *.nothing\n", dir.display()));
+    assert_eq!(stdout, "*.nothing\n");
+}
+
+#[test]
+fn smoke_wildcard_quoted_star_is_literal() {
+    let dir = wild_temp_dir("quoted");
+    wild_touch(&dir, "a");
+    let (stdout, _code) = run(&format!(
+        "cd {}\necho \"*\"\necho '*'\necho \"*\".rs\n",
+        dir.display()
+    ));
+    assert_eq!(stdout, "*\n*\n*.rs\n");
+}
+
+#[test]
+fn smoke_wildcard_only_unquoted_star_expands() {
+    let dir = wild_temp_dir("mixed");
+    wild_touch(&dir, "ab");
+    wild_touch(&dir, "x");
+    wild_touch(&dir, "*x");
+    wild_touch(&dir, "*xy");
+    let (stdout, _code) = run(&format!(
+        "cd {}\necho \"a\"*\necho \"*\"x*\n",
+        dir.display()
+    ));
+    assert_eq!(stdout, "ab\n*x *xy\n");
+}
+
+#[test]
+fn smoke_wildcard_from_variable_expands() {
+    let dir = wild_temp_dir("var");
+    wild_touch(&dir, "a");
+    wild_touch(&dir, "b");
+    let (stdout, _code) = run(&format!("cd {}\nexport X='*'\necho $X\n", dir.display()));
+    assert_eq!(stdout, "a b\n");
+}
+
+#[test]
+fn smoke_wildcard_redirect_single_match() {
+    let dir = wild_temp_dir("redir1");
+    wild_touch(&dir, "t.txt");
+    let (stdout, _code) = run(&format!(
+        "cd {}\necho hi > *.txt\ncat \"t.txt\"\n",
+        dir.display()
+    ));
+    assert_eq!(stdout, "hi\n");
+}
+
+#[test]
+fn smoke_wildcard_redirect_no_match_literal() {
+    let dir = wild_temp_dir("redir0");
+    wild_touch(&dir, "a");
+    let (stdout, _code) = run(&format!(
+        "cd {}\necho hi > *.nothing\ncat \"*.nothing\"\n",
+        dir.display()
+    ));
+    assert_eq!(stdout, "hi\n");
+}
+
+#[test]
+fn smoke_wildcard_redirect_ambiguous_exit_1() {
+    let dir = wild_temp_dir("redir2");
+    wild_touch(&dir, "a.txt");
+    wild_touch(&dir, "b.txt");
+    let (stdout, _code) = run(&format!("cd {}\necho hi > *.txt\necho $?\n", dir.display()));
+    assert_eq!(stdout, "1\n");
+}
+
+#[test]
+fn smoke_wildcard_heredoc_delimiter_not_expanded() {
+    let dir = wild_temp_dir("heredoc");
+    wild_touch(&dir, "STOP");
+    let (stdout, _code) = run(&format!("cd {}\ncat << STOP\nbody\nSTOP\n", dir.display()));
+    assert_eq!(stdout, "body\n");
+}
