@@ -1,4 +1,4 @@
-*This project has been created as part of the 42 curriculum by adam.*
+*This project has been created as an experiment to see how good QWEN3.8-27B-Q4 can be*
 
 minishell is a Bash-like shell written in Rust (42-style).
 
